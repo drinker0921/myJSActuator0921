@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JS执行器</title>
+</head>
+<body>
+    <script>
+        (function() {
+            var js = new URLSearchParams(location.search).get('js');
+            if (js) {
+                try {
+                    eval(decodeURIComponent(js));
+                } catch(e) {
+                    document.body.innerHTML = '<div style="text-align:center;padding:50px;color:red">执行错误: ' + e.message + '</div>';
+                }
+            } else {
+                document.body.innerHTML = '<div style="text-align:center;padding:50px">JS执行器<br>使用方式: ?js=你的代码</div>';
+            }
+        })();
+    </script>
+</body>
+</html>
