@@ -1,2 +1,76 @@
-<!-- 在 web.bworld.fit 的页面里 -->
-<iframe src="http://61.147.97.234:15868/" style="width:100%; height:100vh; border:none;"></iframe>
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Fetch 转发测试</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #fafafa; }
+    pre { background: #fff; padding: 15px; border: 1px solid #ddd; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h2>Fetch 请求参数转发结果</h2>
+  <p>你当前访问的路径：<code id="curPath"></code></p>
+  <p>你当前的查询参数：<code id="curQuery"></code></p>
+  
+  <h3>后端返回的数据：</h3>
+  <pre id="result">请求中...</pre>
+
+  <script>
+    const TARGET_IP = '61.147.97.234';
+    const TARGET_PORT = '15868';
+
+    async function doFetch() {
+      // 1. 拿到当前用户访问的路径和参数
+      // 比如 /myJSActuator0921/test/t.php?a=1
+      let fullPath = window.location.pathname;
+      
+      // 把你 GitHub 前缀去掉，只保留要传给后端的路径（假设你要访问根目录）
+      // 如果你想原样传，可以直接用 window.location.search
+      const searchParams = window.location.search; 
+      
+      document.getElementById('curPath').textContent = fullPath;
+      document.getElementById('curQuery').textContent = searchParams;
+
+      // 2. 拼接真实后端的 URL
+      const targetUrl = `http://${TARGET_IP}:${TARGET_PORT}/${searchParams}`;
+
+      // 3. 准备请求头和请求体
+      const reqHeaders = new Headers();
+      // ⚠️ 只能设置非敏感头，浏览器允许的
+      reqHeaders.append('X-Forwarded-By', 'GitHub-Pages-Frontend');
+      
+      const reqOptions = {
+        method: 'GET', // 如果你想测 POST，可以换成 'POST'
+        headers: reqHeaders,
+        // body: JSON.stringify({ test: 1 }), // 如果是 POST，取消这行注释
+      };
+
+      try {
+        const response = await fetch(targetUrl, reqOptions);
+        
+        // 4. 获取响应文本（HTML/JSON）
+        const text = await response.text();
+        
+        // 5. 渲染到页面上
+        // 注意：因为你拿回来的是 HTML 源码，直接渲染不会带样式，且容易有 XSS 风险
+        // 这里为了演示，直接用 textContent 看源码，或者用 innerHTML 强渲染
+        document.getElementById('result').textContent = 
+          `✅ HTTP 状态: ${response.status}\n\n${text}`;
+          
+        // 如果你想直接看到渲染后的页面：
+        // document.body.innerHTML = text; 
+
+      } catch (err) {
+        document.getElementById('result').textContent = 
+          `❌ 请求失败，大概率是 CORS 跨域拦截或混合内容拦截：\n${err.message}\n\n` +
+          `请检查你的 15868 后端是否设置了：\n` +
+          `Access-Control-Allow-Origin: *`;
+      }
+    }
+
+    // 页面加载后自动执行
+    doFetch();
+  </script>
+</body>
+</html>
