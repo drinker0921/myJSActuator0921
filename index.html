@@ -19,12 +19,13 @@
     const BASE_PATH = '/myJSActuator0921'; 
 
     // ==========================================
-    // 🔥 核心补丁：劫持 fetch，自动带上本地存储的 Cookie
+    // 1. 核心补丁：劫持全局 fetch，自动携带/保存 Cookie
     // ==========================================
     const originalFetch = window.fetch;
-    window.fetch = function(input, init) {
+    window.fetch = async function(input, init) {
       let url = typeof input === 'string' ? input : input.url;
       
+      // 自动补全相对路径
       if (url.startsWith('/')) {
         url = TARGET + url;
         if (typeof input === 'string') {
@@ -34,13 +35,11 @@
         }
       }
 
-      // 从 localStorage 取出之前存下的 Cookie
+      // 从本地取上次存下的 Cookie（解决请求过期）
       const savedCookies = localStorage.getItem('proxy_cookies') || '';
       
       init = init || {};
       init.headers = init.headers || {};
-      
-      // 手动把 Cookie 塞进请求头（解决跨域 Session 丢失）
       if (savedCookies) {
         if (init.headers instanceof Headers) {
           init.headers.append('Cookie', savedCookies);
@@ -50,20 +49,19 @@
       }
       init.credentials = 'include';
       
-      return originalFetch(input, init).then(async res => {
-        // 如果后端下发了新的 Cookie，拦截并保存到 localStorage
-        const setCookie = res.headers.get('Set-Cookie');
-        if (setCookie) {
-           let sessionCookie = setCookie.split(';')[0];
-           localStorage.setItem('proxy_cookies', sessionCookie);
-           console.log('捕获并保存 Cookie:', sessionCookie);
-        }
-        return res;
-      });
+      const res = await originalFetch(input, init);
+
+      // 如果后端下发了 Set-Cookie，存到 localStorage
+      const setCookie = res.headers.get('Set-Cookie');
+      if (setCookie) {
+         let sessionCookie = setCookie.split(';')[0];
+         localStorage.setItem('proxy_cookies', sessionCookie);
+      }
+      return res;
     };
 
     // ==========================================
-    // 核心渲染函数（拉取 HTML 并重写路径）
+    // 2. 页面渲染器
     // ==========================================
     async function loadPage() {
       let path = window.location.pathname;
@@ -74,11 +72,10 @@
       const targetUrl = `${TARGET}${realPath}${query}`;
       
       document.getElementById('loading').style.display = 'block';
-      console.log('正在请求页面:', targetUrl);
+      document.getElementById('app').innerHTML = '';
 
       try {
         const res = await fetch(targetUrl, { method: 'GET' });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
         let html = await res.text();
 
         // 重写路径
@@ -90,27 +87,32 @@
         const app = document.getElementById('app');
         app.innerHTML = html;
 
-        // 执行注入的 <script>
-        const scripts = app.querySelectorAll('script');
-        scripts.forEach(oldScript => {
-          const newScript = document.createElement('script');
-          Array.from(oldScript.attributes).forEach(attr => newScript.setAttribute(attr.name, attr.value));
-          newScript.appendChild(document.createTextNode(oldScript.innerHTML));
-          oldScript.parentNode.replaceChild(newScript, oldScript);
-        });
-
+        // 执行注入的 JS
+        executeScripts(app);
       } catch (err) {
         document.getElementById('loading').innerHTML = `❌ 加载失败: ${err.message}`;
       }
     }
 
+    // 执行页面里的 <script>
+    function executeScripts(container) {
+      const scripts = container.querySelectorAll('script');
+      scripts.forEach(oldScript => {
+        const newScript = document.createElement('script');
+        Array.from(oldScript.attributes).forEach(attr => newScript.setAttribute(attr.name, attr.value));
+        newScript.appendChild(document.createTextNode(oldScript.innerHTML));
+        oldScript.parentNode.replaceChild(newScript, oldScript);
+      });
+    }
+
     // ==========================================
-    // 🔥 拦截器 1：接管 <a> 标签点击
+    // 3. 拦截所有 <a> 标签点击
     // ==========================================
     document.addEventListener('click', function(e) {
       const a = e.target.closest('a');
       if (a && a.href) {
         let targetHref = a.href;
+        
         if (targetHref.includes('61.147.97.234:15868')) {
           e.preventDefault();
           const newPath = targetHref.replace(TARGET, BASE_PATH);
@@ -130,13 +132,14 @@
     });
 
     // ==========================================
-    // 🔥 拦截器 2：接管表单提交
+    // 4. 【核心】拦截表单提交并代理
     // ==========================================
     document.addEventListener('submit', function(e) {
       const form = e.target;
       if (form.tagName === 'FORM') {
-        e.preventDefault(); 
-        
+        e.preventDefault(); // 阻止默认提交
+        console.log('拦截到表单提交，正在代理...');
+
         const formData = new FormData(form);
         let action = form.getAttribute('action') || '';
         if (action.startsWith('/')) action = action.substring(1);
@@ -144,25 +147,50 @@
         const method = (form.getAttribute('method') || 'POST').toUpperCase();
         const postUrl = `${TARGET}/${action}`;
 
-        console.log('表单提交拦截:', postUrl, '方法:', method);
+        // 显示 loading
+        const loadingEl = document.getElementById('loading');
+        if(loadingEl) loadingEl.style.display = 'block';
 
         fetch(postUrl, {
           method: method,
           body: method === 'POST' ? formData : new URLSearchParams(formData)
         }).then(async res => {
           
+          // 情况 A：后端返回了 302 重定向（最常见）
           if (res.redirected) {
-             console.log('后端发生重定向，正在跳转:', res.url);
-             let newUrl = res.url.replace(TARGET, BASE_PATH);
-             history.pushState(null, '', newUrl);
-             loadPage(); 
+             console.log('后端重定向至:', res.url);
+             // 根据返回的新 URL 去请求新页面
+             let newPath = res.url.replace(TARGET, BASE_PATH);
+             history.pushState(null, '', newPath);
+             loadPage();
              return;
           }
 
+          // 情况 B：后端直接返回了页面 HTML
           const contentType = res.headers.get("content-type") || "";
-          
+          if (contentType.includes("text/html")) {
+             let html = await res.text();
+             
+             // 重写路径
+             html = html.replace(/href="\/(?!\/)/g, `href="${TARGET}/`);
+             html = html.replace(/src="\/(?!\/)/g, `src="${TARGET}/`);
+             html = html.replace(/url\(\/(?!\/)/g, `url(${TARGET}/`);
+             
+             document.getElementById('loading').style.display = 'none';
+             const app = document.getElementById('app');
+             app.innerHTML = html;
+             
+             // 更新地址栏为提交的 action 地址
+             history.pushState(null, '', BASE_PATH + '/' + action);
+             executeScripts(app);
+             return;
+          }
+
+          // 情况 C：后端返回 JSON（比如 AJAX 接口）
           if (contentType.includes("application/json")) {
              const data = await res.json();
+             document.getElementById('loading').style.display = 'none';
+             
              if (data.code === 200 || data.status === 'success') {
                 if (data.redirect || data.url) {
                    let redirectUrl = data.redirect || data.url;
@@ -170,33 +198,27 @@
                    history.pushState(null, '', newUrl);
                    loadPage();
                 } else {
-                   loadPage();
+                   loadPage(); // 刷新当前页
                 }
              } else {
                 alert(data.msg || data.message || "操作失败");
              }
-          } else {
-             // 如果是直接返回了 HTML 页面
-             let html = await res.text();
-             html = html.replace(/href="\/(?!\/)/g, `href="${TARGET}/`);
-             html = html.replace(/src="\/(?!\/)/g, `src="${TARGET}/`);
-             
-             document.getElementById('app').innerHTML = html;
-             history.pushState(null, '', BASE_PATH + '/' + action);
-             
-             const scripts = document.getElementById('app').querySelectorAll('script');
-             scripts.forEach(oldScript => {
-               const newScript = document.createElement('script');
-               Array.from(oldScript.attributes).forEach(attr => newScript.setAttribute(attr.name, attr.value));
-               newScript.appendChild(document.createTextNode(oldScript.innerHTML));
-               oldScript.parentNode.replaceChild(newScript, oldScript);
-             });
+             return;
           }
-        }).catch(err => alert('提交请求失败: ' + err.message));
+
+        }).catch(err => {
+          document.getElementById('loading').style.display = 'none';
+          alert('提交请求失败: ' + err.message);
+        });
       }
     });
 
+    // ==========================================
+    // 5. 浏览器前进/后退控制
+    // ==========================================
     window.addEventListener('popstate', loadPage);
+
+    // 首次加载
     loadPage();
   </script>
 </body>
