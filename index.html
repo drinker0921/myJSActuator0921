@@ -2,75 +2,93 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Fetch 转发测试</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>业务代理前台</title>
   <style>
-    body { font-family: monospace; padding: 20px; background: #fafafa; }
-    pre { background: #fff; padding: 15px; border: 1px solid #ddd; overflow-x: auto; }
+    body { margin: 0; padding: 0; background: #f5f5f5; }
+    #app { padding: 20px; }
+    .loading { text-align: center; padding: 50px; font-family: sans-serif; }
   </style>
 </head>
 <body>
-  <h2>Fetch 请求参数转发结果</h2>
-  <p>你当前访问的路径：<code id="curPath"></code></p>
-  <p>你当前的查询参数：<code id="curQuery"></code></p>
-  
-  <h3>后端返回的数据：</h3>
-  <pre id="result">请求中...</pre>
+  <div class="loading" id="loading">正在加载数据...</div>
+  <div id="app"></div>
 
   <script>
-    const TARGET_IP = '61.147.97.234';
-    const TARGET_PORT = '15868';
+    // 你的后端真实地址
+    const TARGET = 'http://61.147.97.234:15868';
+    
+    // 当前 GitHub 的仓库路径（根据你实际情况修改）
+    const BASE_PATH = '/myJSActuator0921'; 
 
-    async function doFetch() {
-      // 1. 拿到当前用户访问的路径和参数
-      // 比如 /myJSActuator0921/test/t.php?a=1
-      let fullPath = window.location.pathname;
+    async function loadPage() {
+      // 1. 解析用户在 GitHub 上访问的路径和参数
+      // 比如：/myJSActuator0921/user/login?a=1
+      let path = window.location.pathname;
+      // 去掉 GitHub 的前缀，得到真实的请求路径（例如：/user/login）
+      let realPath = path.replace(BASE_PATH, '') || '/';
+      // 加上参数
+      const query = window.location.search; 
       
-      // 把你 GitHub 前缀去掉，只保留要传给后端的路径（假设你要访问根目录）
-      // 如果你想原样传，可以直接用 window.location.search
-      const searchParams = window.location.search; 
-      
-      document.getElementById('curPath').textContent = fullPath;
-      document.getElementById('curQuery').textContent = searchParams;
-
-      // 2. 拼接真实后端的 URL
-      const targetUrl = `http://${TARGET_IP}:${TARGET_PORT}/${searchParams}`;
-
-      // 3. 准备请求头和请求体
-      const reqHeaders = new Headers();
-      // ⚠️ 只能设置非敏感头，浏览器允许的
-      reqHeaders.append('X-Forwarded-By', 'GitHub-Pages-Frontend');
-      
-      const reqOptions = {
-        method: 'GET', // 如果你想测 POST，可以换成 'POST'
-        headers: reqHeaders,
-        // body: JSON.stringify({ test: 1 }), // 如果是 POST，取消这行注释
-      };
+      const targetUrl = `${TARGET}${realPath}${query}`;
+      console.log('正在请求后端:', targetUrl);
 
       try {
-        const response = await fetch(targetUrl, reqOptions);
-        
-        // 4. 获取响应文本（HTML/JSON）
-        const text = await response.text();
-        
-        // 5. 渲染到页面上
-        // 注意：因为你拿回来的是 HTML 源码，直接渲染不会带样式，且容易有 XSS 风险
-        // 这里为了演示，直接用 textContent 看源码，或者用 innerHTML 强渲染
-        document.getElementById('result').textContent = 
-          `✅ HTTP 状态: ${response.status}\n\n${text}`;
-          
-        // 如果你想直接看到渲染后的页面：
-        // document.body.innerHTML = text; 
+        // 2. 发起请求（带上凭证，如果你的后端用到了 Session）
+        const res = await fetch(targetUrl, {
+          method: 'GET',
+          credentials: 'include', // 允许跨域带上 Cookie
+          headers: {
+            'X-Requested-With': 'XMLHttpRequest'
+          }
+        });
+
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+
+        let html = await res.text();
+
+        // 3. 修复相对路径（防止 GitHub 上去找 CSS）
+        // 因为你的后端配置了 /public/ 直出，所以只要把根路径改成 TARGET 即可
+        html = html.replace(/href="\/(?!\/)/g, `href="${TARGET}/`);
+        html = html.replace(/src="\/(?!\/)/g, `src="${TARGET}/`);
+        html = html.replace(/url\(\/(?!\/)/g, `url(${TARGET}/`);
+
+        // 4. 注入 HTML
+        document.getElementById('loading').style.display = 'none';
+        const app = document.getElementById('app');
+        app.innerHTML = html;
+
+        // 5. 动态执行 HTML 里的 script 标签（因为 innerHTML 默认不执行 script）
+        const scripts = app.querySelectorAll('script');
+        scripts.forEach(oldScript => {
+          const newScript = document.createElement('script');
+          Array.from(oldScript.attributes).forEach(attr => newScript.setAttribute(attr.name, attr.value));
+          newScript.appendChild(document.createTextNode(oldScript.innerHTML));
+          oldScript.parentNode.replaceChild(newScript, oldScript);
+        });
 
       } catch (err) {
-        document.getElementById('result').textContent = 
-          `❌ 请求失败，大概率是 CORS 跨域拦截或混合内容拦截：\n${err.message}\n\n` +
-          `请检查你的 15868 后端是否设置了：\n` +
-          `Access-Control-Allow-Origin: *`;
+        document.getElementById('loading').innerHTML = `❌ 加载失败: ${err.message}<br>请检查浏览器控制台 Network 面板。`;
       }
     }
 
-    // 页面加载后自动执行
-    doFetch();
+    // 6. 拦截页面内的超链接点击，防止跳转到 GitHub 导致 404
+    document.addEventListener('click', function(e) {
+      const a = e.target.closest('a');
+      if (a && a.href && a.href.startsWith(TARGET)) {
+        e.preventDefault();
+        // 把 http://61.147.97.234:15868/user 替换为 /myJSActuator0921/user
+        const newPath = a.href.replace(TARGET, BASE_PATH);
+        history.pushState(null, '', newPath);
+        loadPage(); // 重新加载
+      }
+    });
+
+    // 监听浏览器的前进后退
+    window.addEventListener('popstate', loadPage);
+
+    // 启动
+    loadPage();
   </script>
 </body>
 </html>
