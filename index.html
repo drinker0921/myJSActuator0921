@@ -11,27 +11,49 @@
   </style>
 </head>
 <body>
-  <div class="loading" id="loading">正在加载数据...</div>
+  <div class="loading" id="loading">正在加载...</div>
   <div id="app"></div>
 
   <script>
     // ==========================================
-    // ⚙️ 配置区（请确保你的仓库名没写错）
+    // ⚙️ 基础配置区（你的后端地址和仓库名）
     // ==========================================
     const TARGET = 'http://61.147.97.234:15868';
     const BASE_PATH = '/myJSActuator0921'; 
 
     // ==========================================
-    // 🚀 核心渲染函数
+    // 🔥 核心补丁：劫持全局 Fetch，防止页面内 JS 跨域报错
+    // ==========================================
+    const originalFetch = window.fetch;
+    window.fetch = function(input, init) {
+      let url = typeof input === 'string' ? input : input.url;
+      
+      // 如果页面里的 JS 请求了 /api/xxx 这种相对路径，强行拼上 TARGET
+      if (url.startsWith('/')) {
+        url = TARGET + url;
+        if (typeof input === 'string') {
+          input = url;
+        } else {
+          input = new Request(url, input);
+        }
+      }
+      
+      // 强制允许携带跨域 Cookie
+      if (init) {
+        init.credentials = 'include';
+      }
+      
+      return originalFetch(input, init);
+    };
+
+    // ==========================================
+    // 🚀 核心渲染函数：拉取并注入 HTML
     // ==========================================
     async function loadPage() {
       let path = window.location.pathname;
-      
-      // 1. 剥离掉 GitHub 的仓库前缀
       let realPath = path.replace(BASE_PATH, '') || '/';
       
-      // 2. 修复路径：如果因为 GitHub 的 404 机制或者用户误操作，
-      // 导致路径里包含了 index.html 或 404.html，直接替换为根目录 '/'
+      // 容错处理：防止 GitHub 的 404 机制或用户误操作导致死循环
       if (realPath.includes('index.html') || realPath.includes('404.html')) {
           realPath = '/';
       }
@@ -40,29 +62,29 @@
       const targetUrl = `${TARGET}${realPath}${query}`;
       
       document.getElementById('loading').style.display = 'block';
-      console.log('正在请求后端:', targetUrl);
+      console.log('正在请求页面:', targetUrl);
 
       try {
         const res = await fetch(targetUrl, {
           method: 'GET',
-          credentials: 'include', 
+          credentials: 'include' 
         });
 
         if (!res.ok) throw new Error('HTTP ' + res.status);
 
         let html = await res.text();
 
-        // 3. 路径重写：修复 CSS、JS、图片的绝对路径
+        // 1. 路径重写（防止 CSS/JS/图片丢失）
         html = html.replace(/href="\/(?!\/)/g, `href="${TARGET}/`);
         html = html.replace(/src="\/(?!\/)/g, `src="${TARGET}/`);
         html = html.replace(/url\(\/(?!\/)/g, `url(${TARGET}/`);
 
-        // 4. 注入 HTML
+        // 2. 注入页面
         document.getElementById('loading').style.display = 'none';
         const app = document.getElementById('app');
         app.innerHTML = html;
 
-        // 5. 让注入的 <script> 标签重新执行（非常重要）
+        // 3. 执行注入的 <script> 标签
         const scripts = app.querySelectorAll('script');
         scripts.forEach(oldScript => {
           const newScript = document.createElement('script');
@@ -72,26 +94,26 @@
         });
 
       } catch (err) {
-        document.getElementById('loading').innerHTML = `❌ 加载失败: ${err.message}<br><br>请检查控制台 Network 面板。`;
+        document.getElementById('loading').innerHTML = `❌ 加载失败: ${err.message}<br><br>请检查控制台。`;
       }
     }
 
     // ==========================================
-    // 🔥 拦截器 1：接管所有 <a> 链接点击
+    // 🔥 拦截器 1：接管所有 <a> 标签点击
     // ==========================================
     document.addEventListener('click', function(e) {
       const a = e.target.closest('a');
       if (a && a.href) {
         let targetHref = a.href;
         
-        // 如果点击的链接是真实后端地址
+        // 拦截跳转到真实后端的链接
         if (targetHref.includes('61.147.97.234:15868')) {
           e.preventDefault();
           const newPath = targetHref.replace(TARGET, BASE_PATH);
           history.pushState(null, '', newPath);
           loadPage(); 
         } 
-        // 如果点击的是前端相对路径
+        // 拦截本地的相对路径链接
         else if (targetHref.startsWith(window.location.origin) || targetHref.startsWith('/')) {
            e.preventDefault();
            let path = targetHref.replace(window.location.origin, '');
@@ -105,42 +127,83 @@
     });
 
     // ==========================================
-    // 🔥 拦截器 2：接管表单提交（如登录、注册）
+    // 🔥 拦截器 2：接管表单提交（登录/注册等）
     // ==========================================
     document.addEventListener('submit', function(e) {
       const form = e.target;
       if (form.tagName === 'FORM') {
-        e.preventDefault(); // 阻止原生跳转
+        e.preventDefault(); 
         
         const formData = new FormData(form);
         let action = form.getAttribute('action') || '';
-        
-        // 拼接真实提交地址
         if (action.startsWith('/')) action = action.substring(1);
-        const postUrl = `${TARGET}/${action}`;
         
-        console.log('正在提交表单到:', postUrl);
+        const method = (form.getAttribute('method') || 'POST').toUpperCase();
+        const postUrl = `${TARGET}/${action}`;
+
+        console.log('表单提交拦截:', postUrl, '方法:', method);
 
         fetch(postUrl, {
-          method: 'POST',
-          body: formData,
+          method: method,
+          body: method === 'POST' ? formData : new URLSearchParams(formData),
           credentials: 'include'
-        }).then(res => {
+        }).then(async res => {
+          
+          // 【核心修复】处理 PHP 的 302/301 重定向
           if (res.redirected) {
-            // 如果后端要求重定向
-            window.location.href = res.url.replace(TARGET, BASE_PATH);
-          } else {
-            // 提交成功，刷新当前页面数据
-            loadPage();
+             console.log('后端发生重定向，正在跳转:', res.url);
+             let newUrl = res.url.replace(TARGET, BASE_PATH);
+             history.pushState(null, '', newUrl);
+             loadPage(); // 重新拉取新页面
+             return;
           }
-        }).catch(err => alert('提交失败: ' + err.message));
+
+          const contentType = res.headers.get("content-type") || "";
+          
+          if (contentType.includes("application/json")) {
+             // 如果后端返回 JSON 格式
+             const data = await res.json();
+             if (data.code === 200 || data.status === 'success') {
+                if (data.redirect || data.url) {
+                   let redirectUrl = data.redirect || data.url;
+                   // 转换成前端路径并跳转
+                   let newUrl = BASE_PATH + (redirectUrl.startsWith('/') ? redirectUrl : '/' + redirectUrl);
+                   history.pushState(null, '', newUrl);
+                   loadPage();
+                } else {
+                   loadPage(); // 刷新当前页
+                }
+             } else {
+                alert(data.msg || data.message || "操作失败");
+             }
+          } else {
+             // 如果后端直接返回了一段 HTML（没有重定向）
+             let html = await res.text();
+             
+             // 重新重写路径并渲染
+             html = html.replace(/href="\/(?!\/)/g, `href="${TARGET}/`);
+             html = html.replace(/src="\/(?!\/)/g, `src="${TARGET}/`);
+             
+             document.getElementById('app').innerHTML = html;
+             history.pushState(null, '', BASE_PATH + '/' + action);
+             
+             // 重新执行注入的 JS
+             const scripts = document.getElementById('app').querySelectorAll('script');
+             scripts.forEach(oldScript => {
+               const newScript = document.createElement('script');
+               Array.from(oldScript.attributes).forEach(attr => newScript.setAttribute(attr.name, attr.value));
+               newScript.appendChild(document.createTextNode(oldScript.innerHTML));
+               oldScript.parentNode.replaceChild(newScript, oldScript);
+             });
+          }
+        }).catch(err => alert('提交请求失败: ' + err.message));
       }
     });
 
-    // 监听浏览器的前进/后退按钮
+    // 监听浏览器的前进/后退
     window.addEventListener('popstate', loadPage);
 
-    // 首次打开执行
+    // 启动页面
     loadPage();
   </script>
 </body>
