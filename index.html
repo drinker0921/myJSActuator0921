@@ -3,223 +3,52 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>小酒支付</title>
+  <title>静态全站代理</title>
   <style>
     body { margin: 0; padding: 0; background: #f5f5f5; }
-    #app { min-height: 100vh; }
-    .loading { text-align: center; padding: 50px; font-family: sans-serif; color: #666; }
+    iframe { width: 100%; height: 100vh; border: none; }
   </style>
 </head>
 <body>
-  <div class="loading" id="loading">正在加载...</div>
-  <div id="app"></div>
+  <!-- 用 iframe 来展示页面，但里面的请求会被 Service Worker 劫持 -->
+  <iframe id="mainFrame"></iframe>
 
   <script>
-    const TARGET = 'http://61.147.97.234:15868';
-    const BASE_PATH = '/myJSActuator0921'; 
+    const BASE_PATH = '/myJSActuator0921';
 
-    // ==========================================
-    // 1. 核心补丁：劫持全局 fetch，自动携带/保存 Cookie
-    // ==========================================
-    const originalFetch = window.fetch;
-    window.fetch = async function(input, init) {
-      let url = typeof input === 'string' ? input : input.url;
-      
-      // 自动补全相对路径
-      if (url.startsWith('/')) {
-        url = TARGET + url;
-        if (typeof input === 'string') {
-          input = url;
-        } else {
-          input = new Request(url, input);
-        }
-      }
+    // 1. 注册 Service Worker
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register(BASE_PATH + '/sw.js', { scope: BASE_PATH + '/' })
+        .then(reg => {
+          console.log('Service Worker 代理已启动！', reg);
+          // 等待 Service Worker 激活后，再加载 iframe
+          if (navigator.serviceWorker.controller) {
+            initIframe();
+          } else {
+            navigator.serviceWorker.ready.then(() => initIframe());
+          }
+        })
+        .catch(err => {
+          alert('Service Worker 注册失败，请确保你的 GitHub 是 HTTPS: ' + err);
+        });
+    } else {
+      alert('你的浏览器不支持 Service Worker');
+    }
 
-      // 从本地取上次存下的 Cookie（解决请求过期）
-      const savedCookies = localStorage.getItem('proxy_cookies') || '';
-      
-      init = init || {};
-      init.headers = init.headers || {};
-      if (savedCookies) {
-        if (init.headers instanceof Headers) {
-          init.headers.append('Cookie', savedCookies);
-        } else {
-          init.headers['Cookie'] = savedCookies;
-        }
-      }
-      init.credentials = 'include';
-      
-      const res = await originalFetch(input, init);
-
-      // 如果后端下发了 Set-Cookie，存到 localStorage
-      const setCookie = res.headers.get('Set-Cookie');
-      if (setCookie) {
-         let sessionCookie = setCookie.split(';')[0];
-         localStorage.setItem('proxy_cookies', sessionCookie);
-      }
-      return res;
-    };
-
-    // ==========================================
-    // 2. 页面渲染器
-    // ==========================================
-    async function loadPage() {
+    // 2. 加载 iframe
+    function initIframe() {
       let path = window.location.pathname;
       let realPath = path.replace(BASE_PATH, '') || '/';
       if (realPath.includes('index.html') || realPath.includes('404.html')) realPath = '/';
-      
+
       const query = window.location.search; 
-      const targetUrl = `${TARGET}${realPath}${query}`;
       
-      document.getElementById('loading').style.display = 'block';
-      document.getElementById('app').innerHTML = '';
-
-      try {
-        const res = await fetch(targetUrl, { method: 'GET' });
-        let html = await res.text();
-
-        // 重写路径
-        html = html.replace(/href="\/(?!\/)/g, `href="${TARGET}/`);
-        html = html.replace(/src="\/(?!\/)/g, `src="${TARGET}/`);
-        html = html.replace(/url\(\/(?!\/)/g, `url(${TARGET}/`);
-
-        document.getElementById('loading').style.display = 'none';
-        const app = document.getElementById('app');
-        app.innerHTML = html;
-
-        // 执行注入的 JS
-        executeScripts(app);
-      } catch (err) {
-        document.getElementById('loading').innerHTML = `❌ 加载失败: ${err.message}`;
-      }
+      // 关键：请求的是本地的 /proxy/ 路径，让 Service Worker 去拦截
+      const proxyUrl = `${BASE_PATH}/proxy${realPath}${query}`;
+      
+      console.log('iframe 加载本地代理路径:', proxyUrl);
+      document.getElementById('mainFrame').src = proxyUrl;
     }
-
-    // 执行页面里的 <script>
-    function executeScripts(container) {
-      const scripts = container.querySelectorAll('script');
-      scripts.forEach(oldScript => {
-        const newScript = document.createElement('script');
-        Array.from(oldScript.attributes).forEach(attr => newScript.setAttribute(attr.name, attr.value));
-        newScript.appendChild(document.createTextNode(oldScript.innerHTML));
-        oldScript.parentNode.replaceChild(newScript, oldScript);
-      });
-    }
-
-    // ==========================================
-    // 3. 拦截所有 <a> 标签点击
-    // ==========================================
-    document.addEventListener('click', function(e) {
-      const a = e.target.closest('a');
-      if (a && a.href) {
-        let targetHref = a.href;
-        
-        if (targetHref.includes('61.147.97.234:15868')) {
-          e.preventDefault();
-          const newPath = targetHref.replace(TARGET, BASE_PATH);
-          history.pushState(null, '', newPath);
-          loadPage(); 
-        } 
-        else if (targetHref.startsWith(window.location.origin) || targetHref.startsWith('/')) {
-           e.preventDefault();
-           let path = targetHref.replace(window.location.origin, '');
-           if (!path.startsWith(BASE_PATH)) {
-               path = BASE_PATH + (path.startsWith('/') ? path : '/' + path);
-           }
-           history.pushState(null, '', path);
-           loadPage();
-        }
-      }
-    });
-
-    // ==========================================
-    // 4. 【核心】拦截表单提交并代理
-    // ==========================================
-    document.addEventListener('submit', function(e) {
-      const form = e.target;
-      if (form.tagName === 'FORM') {
-        e.preventDefault(); // 阻止默认提交
-        console.log('拦截到表单提交，正在代理...');
-
-        const formData = new FormData(form);
-        let action = form.getAttribute('action') || '';
-        if (action.startsWith('/')) action = action.substring(1);
-        
-        const method = (form.getAttribute('method') || 'POST').toUpperCase();
-        const postUrl = `${TARGET}/${action}`;
-
-        // 显示 loading
-        const loadingEl = document.getElementById('loading');
-        if(loadingEl) loadingEl.style.display = 'block';
-
-        fetch(postUrl, {
-          method: method,
-          body: method === 'POST' ? formData : new URLSearchParams(formData)
-        }).then(async res => {
-          
-          // 情况 A：后端返回了 302 重定向（最常见）
-          if (res.redirected) {
-             console.log('后端重定向至:', res.url);
-             // 根据返回的新 URL 去请求新页面
-             let newPath = res.url.replace(TARGET, BASE_PATH);
-             history.pushState(null, '', newPath);
-             loadPage();
-             return;
-          }
-
-          // 情况 B：后端直接返回了页面 HTML
-          const contentType = res.headers.get("content-type") || "";
-          if (contentType.includes("text/html")) {
-             let html = await res.text();
-             
-             // 重写路径
-             html = html.replace(/href="\/(?!\/)/g, `href="${TARGET}/`);
-             html = html.replace(/src="\/(?!\/)/g, `src="${TARGET}/`);
-             html = html.replace(/url\(\/(?!\/)/g, `url(${TARGET}/`);
-             
-             document.getElementById('loading').style.display = 'none';
-             const app = document.getElementById('app');
-             app.innerHTML = html;
-             
-             // 更新地址栏为提交的 action 地址
-             history.pushState(null, '', BASE_PATH + '/' + action);
-             executeScripts(app);
-             return;
-          }
-
-          // 情况 C：后端返回 JSON（比如 AJAX 接口）
-          if (contentType.includes("application/json")) {
-             const data = await res.json();
-             document.getElementById('loading').style.display = 'none';
-             
-             if (data.code === 200 || data.status === 'success') {
-                if (data.redirect || data.url) {
-                   let redirectUrl = data.redirect || data.url;
-                   let newUrl = BASE_PATH + (redirectUrl.startsWith('/') ? redirectUrl : '/' + redirectUrl);
-                   history.pushState(null, '', newUrl);
-                   loadPage();
-                } else {
-                   loadPage(); // 刷新当前页
-                }
-             } else {
-                alert(data.msg || data.message || "操作失败");
-             }
-             return;
-          }
-
-        }).catch(err => {
-          document.getElementById('loading').style.display = 'none';
-          alert('提交请求失败: ' + err.message);
-        });
-      }
-    });
-
-    // ==========================================
-    // 5. 浏览器前进/后退控制
-    // ==========================================
-    window.addEventListener('popstate', loadPage);
-
-    // 首次加载
-    loadPage();
   </script>
 </body>
 </html>
